@@ -26,58 +26,46 @@ const static char *TAG = "tank_sensor";
 
 const float LOW_BATTERY_VOLTAGE = 3.40; // warn user battery low
 
-// Map to thermostat.
-// int16_t local_temperature;             /*!< This attribute represents the temperature in degrees Celsius */
-// int16_t occupied_cooling_setpoint;     /*!< This attribute specifies the cooling mode setpoint when the room is occupied */
-// int16_t occupied_heating_setpoint;     /*!< This attribute specifies the heating mode setpoint when the room is occupied */
-// uint8_t control_sequence_of_operation; /*!< This attribute specifies the overall operating environment and possible system modes */
-// uint8_t system_mode;                   /*!< This attribute specifies the current operating mode */
-static int16_t tank_min_cm = 20;   // distance from ultrasonic sensor to top of water
-static int16_t tank_max_cm = 200; // distance from ultrasonic sensor to bottom of tank (when it's empty)
-static int16_t tank_capacity_L = 3000;
-static uint8_t cm_delta_to_report = 3;
-static uint8_t ultrasonic_read_interval_minutes = 1;
+static float_t tank_min_cm = 20;            // distance from ultrasonic sensor to top of water
+static float_t tank_max_cm = 200;           // distance from ultrasonic sensor to bottom of tank (when it's empty)
+static float_t tank_capacity_L = 3000;
+static float_t cm_delta_to_report = 3;
+static float_t ultrasonic_read_interval_seconds = 3;
 
 
 static void trigger_ultrasonic_read() // void *arg
 {
     vTaskDelay(pdMS_TO_TICKS(5000));
     uint32_t tof_ticks;
-
     for (;;) {
         // generate single pulse on Trig pin to start a new sample
         gpio_set_level(HC_SR04_TRIG_GPIO, 1); // set high
-        //vTaskDelay(pdMS_TO_TICKS(1));
         vTaskDelay(1);
         gpio_set_level(HC_SR04_TRIG_GPIO, 0); // set low
-
         // wait for echo done signal
         if (xTaskNotifyWait(0x00, ULONG_MAX, &tof_ticks, pdMS_TO_TICKS(1000)) == pdTRUE) {
             float pulse_width_us = tof_ticks * (1000000.0 / esp_clk_apb_freq());
             if (pulse_width_us <= 35000) { // not out of range
                 // convert the pulse width into measure distance
-                float distance = (float) pulse_width_us / 58;
+                
+                float_t distance = (float_t) pulse_width_us / 58;
+                float_t fractionFull = (distance-tank_min_cm)/(tank_max_cm-tank_min_cm);
+                float_t litres = fractionFull * tank_capacity_L;
+                float_t percentFull = fractionFull*100;
 
-                uint16_t dist = (uint16_t)distance;
-
-                ESP_LOGI(TAG, "Measured distance: %.2fcm (%u)", distance, dist);
-
-
+                // ESP_LOGI(TAG, "Measured distance: %.2fcm (%u)", distance, dist);
+                
                 esp_zb_lock_acquire(portMAX_DELAY);
-
-
-                esp_zb_zcl_set_attribute_val(1,
-                    ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                    ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &dist, false);
-
-
+                esp_zb_zcl_set_attribute_val(1, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_VALUE, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                    ESP_ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID, &distance, false);
+                esp_zb_zcl_set_attribute_val(2, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_VALUE, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                    ESP_ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID, &litres, false);
+                esp_zb_zcl_set_attribute_val(3, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_VALUE, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                    ESP_ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID, &percentFull, false);
                 esp_zb_lock_release();
             }
         }
-
-        // vTaskDelay(pdMS_TO_TICKS(ultrasonic_read_interval_s*1000));
-        //vTaskDelay(pdMS_TO_TICKS(10000));
-        vTaskDelay(100);
+        vTaskDelay(pdMS_TO_TICKS(ultrasonic_read_interval_seconds*1000));
     }
 }
 static bool hc_sr04_echo_callback(mcpwm_cap_channel_handle_t cap_chan, const mcpwm_capture_event_data_t *edata, void *user_data)
@@ -215,7 +203,33 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     }
 }
 
-
+static void add_av_endpoint(esp_zb_ep_list_t *ep_list, uint8_t ep_num)
+{
+    esp_zb_basic_cluster_cfg_t basic = {
+        .power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_DEFAULT_VALUE,
+        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE
+    };
+    esp_zb_identify_cluster_cfg_t identify = {
+        .identify_time = ESP_ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE
+    };
+    esp_zb_endpoint_config_t endpoint = {
+        .endpoint = ep_num, .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID, .app_device_id = ESP_ZB_HA_CONSUMPTION_AWARENESS_DEVICE_ID, .app_device_version = 0
+    };
+    esp_zb_analog_value_cluster_cfg_t av_cfg = {
+        .present_value = 0.0f,
+        .out_of_service = false,
+        .status_flags = 0
+    };
+    esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(&basic);
+    esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
+    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(&identify), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_analog_value_cluster(cluster_list, esp_zb_analog_value_cluster_create(&av_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    esp_zb_ep_list_add_ep(ep_list, cluster_list, endpoint);
+}
 
 static void esp_zb_task(void *pvParameters)
 {
@@ -231,6 +245,10 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_identify_cluster_cfg_t identify = {
         .identify_time = ESP_ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE
     };
+    esp_zb_endpoint_config_t endpoint_1 = {
+        .endpoint = 1, .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID, .app_device_id = ESP_ZB_HA_CONSUMPTION_AWARENESS_DEVICE_ID, .app_device_version = 0
+    };
+
 
 	// - [Output] Distance: uint 0-400
 	// - [Output] Litres: uint 0-3300
@@ -241,54 +259,10 @@ static void esp_zb_task(void *pvParameters)
 	// - [Input] cm delta to report on: uint small
     //   [Input] Measure period: uint in seconds, so thousands
 
-    esp_zb_humidity_meas_cluster_cfg_t output_cfg = {
-        .max_value = 100,
-        .min_value = 10,
-        .measured_value = 123
-    };
-    // uint16_t measured_value;                     /*!<  The attribute indicates the humidity in 100*percent */
-    // uint16_t min_value;                          /*!<  The attribute indicates minimum value of the measured value */
-    // uint16_t max_value;                          /*!<  The attribute indicates maximum value of the measured value */
-
-    esp_zb_thermostat_cfg_t input_cfg = {
-        .thermostat_cfg = {
-            .local_temperature = 1,
-            .occupied_cooling_setpoint = 2,
-            .occupied_heating_setpoint = 3,
-            .control_sequence_of_operation = 4,
-            .system_mode = 5
-        }
-    };
-    // int16_t local_temperature;             /*!< This attribute represents the temperature in degrees Celsius */
-    // int16_t occupied_cooling_setpoint;     /*!< This attribute specifies the cooling mode setpoint when the room is occupied */
-    // int16_t occupied_heating_setpoint;     /*!< This attribute specifies the heating mode setpoint when the room is occupied */
-    // uint8_t control_sequence_of_operation; /*!< This attribute specifies the overall operating environment and possible system modes */
-    // uint8_t system_mode;                   /*!< This attribute specifies the current operating mode */
-
-    esp_zb_endpoint_config_t output_endpoint = {
-        .endpoint = 1,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_CONSUMPTION_AWARENESS_DEVICE_ID,
-        .app_device_version = 0
-    };
-    esp_zb_endpoint_config_t input_endpoint = {
-        .endpoint = 2,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_WHITE_GOODS_DEVICE_ID,
-        .app_device_version = 0
-    };
-
-    esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(&basic);
-    esp_zb_cluster_list_t *output_cluster_list = esp_zb_zcl_cluster_list_create();
-    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
-    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(output_cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(output_cluster_list, esp_zb_identify_cluster_create(&identify), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(output_cluster_list, esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_humidity_meas_cluster(output_cluster_list, esp_zb_humidity_meas_cluster_create(&output_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-
-    esp_zb_ep_list_add_ep(ep_list, output_cluster_list, output_endpoint);
-    esp_zb_ep_list_add_ep(ep_list, esp_zb_thermostat_clusters_create(&input_cfg), input_endpoint);
+    for (size_t i = 1; i <= 8; i++)
+    {
+        add_av_endpoint(ep_list, i);
+    }
 
     esp_zb_device_register(ep_list);
 
