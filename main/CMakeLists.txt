@@ -5,12 +5,7 @@ idf_component_register(
         esp-zboss-lib
         esp-zigbee-lib
         nvs_flash
-        esp_adc
 )
-
-# REQUIRES esp_driver_mcpwm
-
-
 
 # make sure CONFIG_ZB_ENABLED is enabled in SDK configuration.
 # https://stackoverflow.com/questions/74900268/esp-idf-build-fails-with-fatal-error-esp-wifi-h-no-such-file-or-directory?rq=1
