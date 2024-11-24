@@ -12,14 +12,43 @@
 #include "esp_zigbee_core.h"
 #include "ha/esp_zigbee_ha_standard.h"
 const static char *TAG = "tank_sensor";
-#define HC_SR04_TRIG_GPIO  GPIO_NUM_15
-#define HC_SR04_ECHO_GPIO  GPIO_NUM_14
+
+#define HC_SR04_TRIG_GPIO  GPIO_NUM_2
+#define HC_SR04_ECHO_GPIO  GPIO_NUM_3
 
 #define CLUSTER_ID ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT
 #define ATTRIBUTE_ID ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID
 
-static uint16_t cm_delta = 100;         // in 0.01 cm. Only used for reporting.
-static uint16_t sample_period_s = 5;    // Used for reporting and sampling.
+static uint16_t cm_delta = 100;         // in 0.01 cm. Only used for reporting. (Configurable as report parameter)
+static uint16_t sample_period_s = 5;    // Used for reporting and sampling.     (Configurable as report parameter)
+
+#define SAMPLE_COUNT 5
+#define SMOOTH_WEIGHT 0.5
+static uint16_t samples[SAMPLE_COUNT];
+static size_t sample_i = 0;
+
+uint16_t getMovingAverage(uint16_t latestSample)
+{
+    samples[sample_i] = latestSample;
+    sample_i++;
+    if (sample_i >= SAMPLE_COUNT)
+        sample_i = 0;
+
+    uint32_t sum = 0;
+    uint16_t samplesSummed = 0;
+
+    for (int i = 0; i < SAMPLE_COUNT; ++i)
+    {
+        // ESP_LOGI(TAG, "DEBUG Sample[%d]: %u", i, samples[i]);
+        if (samples[i] > 0)
+        {
+            sum += samples[i];
+            samplesSummed++;
+        }
+    }
+    // ESP_LOGI(TAG, "DEBUG sum: %lu, samplesSummed: %u", sum, samplesSummed);
+    return (uint16_t)(((float)sum)/samplesSummed);
+}
 
 static void trigger_ultrasonic_read()
 {
@@ -37,11 +66,12 @@ static void trigger_ultrasonic_read()
                 // convert the pulse width into measure distance
                 float dist = pulse_width_us / 58.0f;
                 uint16_t distance = (uint16_t) (100*dist);
+                uint16_t smoothDistance = getMovingAverage(distance);
                 if (esp_zb_lock_acquire(portMAX_DELAY))
                 {
-                    ESP_LOGI(TAG, "Distance: %0.2f cm. Write %u to attribute", dist, distance);
+                    ESP_LOGI(TAG, "Distance: %0.2f cm. Scaled: %u. Smoothed: %u", dist, distance, smoothDistance);
                     esp_zb_zcl_set_attribute_val(1, CLUSTER_ID, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                        ATTRIBUTE_ID, &distance, false);
+                        ATTRIBUTE_ID, &smoothDistance, false);
                     esp_zb_lock_release();
                 }
                 else {
@@ -127,6 +157,10 @@ static esp_err_t deferred_driver_init(void)
     ESP_ERROR_CHECK(mcpwm_capture_timer_enable(cap_timer));
     ESP_ERROR_CHECK(mcpwm_capture_timer_start(cap_timer));
 
+    for (int i = 0; i < SAMPLE_COUNT; ++i) {
+        samples[i] = 0;
+    }
+
     return (ret == pdTRUE) ? ESP_OK : ESP_FAIL;
 }
 
@@ -174,7 +208,6 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
                     cm_delta = new_cm_delta;
                     sample_period_s = new_sample_period;
                     nvs_handle_t my_handle;
-                    bool didWrite = false;
                     ESP_ERROR_CHECK(nvs_open("storage", NVS_READWRITE, &my_handle));
                     ESP_ERROR_CHECK(nvs_set_u16(my_handle, "cm_delta", cm_delta));
                     ESP_ERROR_CHECK(nvs_set_u16(my_handle, "sample_period_s", sample_period_s));
