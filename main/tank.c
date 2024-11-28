@@ -11,7 +11,12 @@
 #include "driver/gpio.h"
 #include "esp_zigbee_core.h"
 #include "ha/esp_zigbee_ha_standard.h"
+#include "../switch_driver/include/switch_driver.h"
 const static char *TAG = "tank_sensor";
+
+#if !defined CONFIG_ZB_ZCZR
+#error Define ZB_ZCZR in idf.py menuconfig to compile router source code.
+#endif
 
 #define HC_SR04_TRIG_GPIO  GPIO_NUM_2
 #define HC_SR04_ECHO_GPIO  GPIO_NUM_3
@@ -26,6 +31,19 @@ static uint16_t sample_period_s = 5;    // Used for reporting and sampling.     
 #define SMOOTH_WEIGHT 0.5
 static uint16_t samples[SAMPLE_COUNT];
 static size_t sample_i = 0;
+
+static switch_func_pair_t button_func_pair[] = {
+    {GPIO_INPUT_IO_TOGGLE_SWITCH, SWITCH_ONOFF_TOGGLE_CONTROL}
+};
+
+static void esp_app_buttons_handler(switch_func_pair_t *button_func_pair)
+{
+    if (button_func_pair->func == SWITCH_ONOFF_TOGGLE_CONTROL)
+    {
+        ESP_EARLY_LOGW(TAG, "Factory reset Zigbee settings. The device will completely erase the zb_storage partition and then restart.");
+        esp_zb_factory_reset();
+    }
+}
 
 uint16_t getMovingAverage(uint16_t latestSample)
 {
@@ -161,6 +179,9 @@ static esp_err_t deferred_driver_init(void)
         samples[i] = 0;
     }
 
+    ESP_RETURN_ON_FALSE(switch_driver_init(button_func_pair, PAIR_SIZE(button_func_pair), esp_app_buttons_handler), ESP_FAIL, TAG,
+                        "Failed to initialize switch driver");
+
     return (ret == pdTRUE) ? ESP_OK : ESP_FAIL;
 }
 
@@ -281,7 +302,7 @@ static void load_config()
 
 static void esp_zb_task(void *pvParameters)
 {
-    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
+    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
     add_endpoint(ep_list, 1);
@@ -302,7 +323,7 @@ static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
 
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
-    uint32_t *p_sg_p     = signal_struct->p_app_signal;
+    uint32_t *p_sg_p = signal_struct->p_app_signal;
     esp_err_t err_status = signal_struct->esp_err_status;
     esp_zb_app_signal_type_t sig_type = *p_sg_p;
     switch (sig_type) {
@@ -322,7 +343,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 ESP_LOGI(TAG, "Device rebooted");
             }
         } else {
-            /* commissioning failed */
             ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %s)", esp_err_to_name(err_status));
         }
         break;
@@ -339,9 +359,17 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
         }
         break;
+    case ESP_ZB_NWK_SIGNAL_PERMIT_JOIN_STATUS:
+        if (err_status == ESP_OK) {
+            if (*(uint8_t *)esp_zb_app_signal_get_params(p_sg_p)) {
+                ESP_LOGI(TAG, "Network(0x%04hx) is open for %d seconds", esp_zb_get_pan_id(), *(uint8_t *)esp_zb_app_signal_get_params(p_sg_p));
+            } else {
+                ESP_LOGW(TAG, "Network(0x%04hx) closed, devices joining not allowed.", esp_zb_get_pan_id());
+            }
+        }
+        break;
     default:
-        ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type,
-                 esp_err_to_name(err_status));
+        ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(err_status));
         break;
     }
 }

@@ -16,6 +16,7 @@ const definition = {
             precision: 2,
             scale: 100,
             reporting: {min: 5, max: 0, change: 100},
+            //access: 0b101
         })
     ],
     meta: {},
